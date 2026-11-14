@@ -1,0 +1,20 @@
+services:
+  plex-delete-list:
+    build: .
+    container_name: plex-delete-list
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      # Optional. Connections can also be entered on the Settings page (stored in SQLite).
+      # RADARR_URL: http://radarr:7878
+      # RADARR_API_KEY: ""
+      # SONARR_URL: http://sonarr:8989
+      # SONARR_API_KEY: ""
+      # SEERR_URL: http://seerr:5055
+      # SEERR_API_KEY: ""
+      # Recommended if anything other than you can reach this port: require a key for /api and /mcp.
+      # PDL_API_KEY: "change-me"
+      PDL_SYNC_INTERVAL_MINUTES: "60"
