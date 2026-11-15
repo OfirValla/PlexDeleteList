@@ -47,7 +47,7 @@ export default function App() {
             Library
           </button>
           <button type="button" className={tab === 'queue' ? 'on' : ''} onClick={() => setTab('queue')}>
-            Review queue {pending > 0 && <span className="count">{pending}</span>}
+            Delete list {pending > 0 && <span className="count">{pending}</span>}
           </button>
           <button type="button" className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>
             Settings

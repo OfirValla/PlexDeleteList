@@ -197,13 +197,6 @@ main {
   font-weight: 600;
 }
 
-.btn.danger {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: #fff;
-  font-weight: 600;
-}
-
 .link {
   padding: 0;
   border: 0;
@@ -880,38 +873,6 @@ select {
   margin-bottom: 10px;
   color: var(--muted);
   cursor: pointer;
-}
-
-.modal.confirm {
-  max-width: 520px;
-  padding: 22px;
-  margin-top: 10vh;
-}
-
-.confirm p {
-  margin: 10px 0;
-}
-
-.confirm-list {
-  margin: 0 0 18px;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: 6px;
-  max-height: 40vh;
-  overflow-y: auto;
-}
-
-.confirm-list li {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 /* ---------- settings ---------- */

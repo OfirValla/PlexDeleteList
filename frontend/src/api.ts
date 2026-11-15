@@ -100,12 +100,6 @@ export interface MarkTarget {
   episode_id?: number;
 }
 
-export interface ApplyResult {
-  applied: number;
-  failed: number;
-  results: { id: number; media_title: string; label: string; status: 'done' | 'failed'; error: string | null }[];
-}
-
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -172,6 +166,4 @@ export const api = {
   marks: () => request<{ pending: Mark[]; history: Mark[] }>('GET', '/api/marks'),
   createMark: (mark: MarkTarget & { media_id: number; action: Action }) => request<Mark>('POST', '/api/marks', mark),
   deleteMark: (id: number) => request<{ removed: number }>('DELETE', `/api/marks/${id}`),
-  clearMarks: (which: 'pending' | 'history') => request<{ removed: number }>('DELETE', `/api/marks?which=${which}`),
-  apply: (ids?: number[]) => request<ApplyResult>('POST', '/api/marks/apply', { ids }),
-};
+  clearMarks: (which: 'pending' | 'history') => request<{ removed: number }>('DELETE', `/api/marks?which=${which}`),};

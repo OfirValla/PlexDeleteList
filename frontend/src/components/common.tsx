@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import type { Action } from '../api';
+import { sizedImage } from '../util';
 
 const paths = {
   trash: 'M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v6M14 11v6',
@@ -29,11 +30,16 @@ export function Icon({ name, size = 16 }: { name: keyof typeof paths; size?: num
   );
 }
 
-/** Poster image with a text placeholder for missing or broken artwork. */
-export function Poster({ url, title }: { url: string | null; title: string }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [url]);
-  if (!url || failed) {
+/**
+ * Poster image, loaded at a size that fits (see `sizedImage`). If the CDN has no such thumbnail it falls
+ * back to the full-size image, and to a text placeholder when there is no usable artwork at all.
+ */
+export function Poster({ url, title, size = 'poster' }: { url: string | null; title: string; size?: 'poster' | 'thumb' }) {
+  const [failures, setFailures] = useState(0);
+  useEffect(() => setFailures(0), [url]);
+  const sized = sizedImage(url, size);
+  const src = failures === 0 ? sized : failures === 1 && sized !== url ? url : null;
+  if (!src) {
     return (
       <div className="poster poster-empty">
         <Icon name="film" size={28} />
@@ -41,7 +47,9 @@ export function Poster({ url, title }: { url: string | null; title: string }) {
       </div>
     );
   }
-  return <img className="poster" src={url} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />;
+  return (
+    <img className="poster" src={src} alt="" loading="lazy" decoding="async" onError={() => setFailures((n) => n + 1)} />
+  );
 }
 
 /**

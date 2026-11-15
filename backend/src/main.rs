@@ -22,14 +22,17 @@ use axum::{
 };
 use rusqlite::Connection;
 use serde_json::json;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::{
+    compression::CompressionLayer,
+    services::{ServeDir, ServeFile},
+};
 
 pub struct AppState {
     db: Mutex<Connection>,
     pub http: reqwest::Client,
     pub api_key: Option<String>,
-    /// Serialises sync and apply so they never interleave.
-    pub work_lock: tokio::sync::Mutex<()>,
+    /// One sync at a time.
+    pub sync_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -46,7 +49,8 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
 }
 
-const USAGE: &str = "plex-delete-list — review and clean up a Plex library via Radarr/Sonarr
+const USAGE: &str = "plex-delete-list — collect a list of what to delete from a Plex library.
+It only reads from Radarr/Sonarr/Seerr and never deletes or changes anything there.
 
 USAGE:
   plex-delete-list [serve]          Run the web server (default)
@@ -97,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: Mutex::new(conn),
         http: reqwest::Client::builder().timeout(Duration::from_secs(120)).build()?,
         api_key: std::env::var("PDL_API_KEY").ok().filter(|k| !k.is_empty()),
-        work_lock: tokio::sync::Mutex::new(()),
+        sync_lock: tokio::sync::Mutex::new(()),
     });
 
     let interval: u64 = env_or("PDL_SYNC_INTERVAL_MINUTES", "60").parse().unwrap_or(60);
@@ -132,12 +136,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/media/{id}", get(api::get_media))
         .route("/api/media/{id}/episodes", get(api::episodes))
         .route("/api/marks", get(api::list_marks).post(api::create_mark).delete(api::clear_marks))
-        .route("/api/marks/apply", post(api::apply))
         .route("/api/marks/{id}", delete(api::delete_mark))
         .route("/mcp", post(mcp::http))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state.clone())
-        .fallback_service(spa);
+        .fallback_service(spa)
+        // gzip the library JSON and the frontend bundle; both shrink to under a third.
+        .layer(CompressionLayer::new());
 
     let bind = env_or("PDL_BIND", "0.0.0.0:8080");
     let listener = tokio::net::TcpListener::bind(&bind).await?;

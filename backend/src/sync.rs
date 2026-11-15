@@ -1,24 +1,21 @@
-//! Pulls the library from Radarr/Sonarr (and request info from Seerr) into SQLite.
+//! Pulls the library from Radarr/Sonarr (and request info from Seerr) into SQLite, and ticks off delete
+//! marks whose files have since been removed. Strictly read-only towards those services.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rusqlite::{named_params, Transaction};
 use serde_json::{json, Value};
 
 use crate::{
     arr::{image, Client},
-    db,
+    db::{self, NOW},
     error::Result,
     AppState,
 };
 
 pub async fn sync_all(state: &AppState) -> Result<Value> {
-    let _guard = state.work_lock.lock().await;
-    sync_inner(state).await
-}
+    let _guard = state.sync_lock.lock().await;
 
-/// Caller must hold `work_lock`.
-pub async fn sync_inner(state: &AppState) -> Result<Value> {
     let radarr = Client::for_service(state, "radarr")?;
     let sonarr = Client::for_service(state, "sonarr")?;
     let seerr = Client::for_service(state, "seerr")?;
@@ -67,6 +64,12 @@ pub async fn sync_inner(state: &AppState) -> Result<Value> {
     let movie_count = movies.as_ref().and_then(Value::as_array).map(Vec::len);
     let series_count = series.as_ref().and_then(Value::as_array).map(Vec::len);
 
+    let gone_episodes = match (&sonarr, &series) {
+        (Some(client), Some(list)) => deleted_marked_episodes(state, client, list, &mut errors).await?,
+        _ => Vec::new(),
+    };
+    let mut ticked_off = 0;
+
     state.db(|conn| {
         let tx = conn.transaction()?;
         let now: String = tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| r.get(0))?;
@@ -108,7 +111,35 @@ pub async fn sync_inner(state: &AppState) -> Result<Value> {
             tx.execute("DELETE FROM media WHERE kind = 'series' AND synced_at <> ?1", [&now])?;
         }
 
-        // Pending marks whose item disappeared can never be applied.
+        // Tick off delete marks whose files are gone, however the user removed them. Only for a service
+        // that answered: an unreachable or disconnected Radarr/Sonarr says nothing about what is on disk.
+        let answered = [("movie", movies.is_some()), ("series", series.is_some())];
+        for (kind, _) in answered.iter().filter(|(_, ok)| *ok) {
+            ticked_off += tx.execute(
+                &format!(
+                    "UPDATE marks SET status = 'done', executed_at = {NOW}
+                     WHERE status = 'pending' AND action = 'delete' AND media_kind = ?1 AND (
+                           media_id IS NULL
+                        OR (scope IN ('movie', 'series')
+                            AND (SELECT file_count FROM media WHERE id = marks.media_id) = 0)
+                        OR (scope IN ('season', 'episode')
+                            AND COALESCE((SELECT episode_file_count FROM seasons s
+                                          WHERE s.media_id = marks.media_id
+                                            AND s.season_number = marks.season_number), 0) = 0))"
+                ),
+                [kind],
+            )?;
+        }
+        for episode_id in &gone_episodes {
+            ticked_off += tx.execute(
+                &format!(
+                    "UPDATE marks SET status = 'done', executed_at = {NOW}
+                     WHERE status = 'pending' AND action = 'delete' AND scope = 'episode' AND episode_id = ?1"
+                ),
+                [episode_id],
+            )?;
+        }
+        // Anything else that lost its item (a redownload mark, or a disconnected service) points at nothing.
         tx.execute("DELETE FROM marks WHERE status = 'pending' AND media_id IS NULL", [])?;
 
         if let Some(map) = &requests {
@@ -138,8 +169,56 @@ pub async fn sync_inner(state: &AppState) -> Result<Value> {
         "movies": movie_count,
         "series": series_count,
         "seerr_requests": requests.as_ref().map(HashMap::len),
+        "ticked_off": ticked_off,
         "errors": errors,
     }))
+}
+
+/// Of the episodes marked for deletion, the Sonarr ids of those whose file is already gone.
+/// Seasons and whole items are judged from the synced counts; single episodes need this extra lookup.
+async fn deleted_marked_episodes(
+    state: &AppState,
+    sonarr: &Client,
+    series: &Value,
+    errors: &mut Vec<String>,
+) -> Result<Vec<i64>> {
+    let marked: Vec<(i64, i64)> = state.db(|c| {
+        let mut stmt = c.prepare(
+            "SELECT m.arr_id, k.episode_id FROM marks k JOIN media m ON m.id = k.media_id
+             WHERE k.status = 'pending' AND k.action = 'delete' AND k.scope = 'episode'
+               AND k.episode_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let list = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(list)
+    })?;
+
+    // A series that left Sonarr altogether is handled by the sync itself; asking about it would only error.
+    let known: HashSet<i64> = series.as_array().into_iter().flatten().filter_map(|s| s["id"].as_i64()).collect();
+    let mut by_series: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for (series_id, episode_id) in marked {
+        if known.contains(&series_id) {
+            by_series.entry(series_id).or_default().push(episode_id);
+        }
+    }
+
+    let mut gone = Vec::new();
+    for (series_id, episode_ids) in by_series {
+        match sonarr.get("/episode", &[("seriesId", series_id.to_string())]).await {
+            Ok(list) => {
+                let on_disk: HashSet<i64> = list
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|e| e["hasFile"] == true)
+                    .filter_map(|e| e["id"].as_i64())
+                    .collect();
+                gone.extend(episode_ids.into_iter().filter(|id| !on_disk.contains(id)));
+            }
+            Err(e) => errors.push(e.message),
+        }
+    }
+    Ok(gone)
 }
 
 struct MediaRow {

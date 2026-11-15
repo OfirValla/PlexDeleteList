@@ -1,4 +1,7 @@
-//! The review queue: marking items for delete/redownload, and applying those marks through Radarr/Sonarr.
+//! The delete list: marking items for delete/redownload.
+//!
+//! Marks are only a record of what the user should remove. Nothing here (or anywhere in this app) acts on
+//! them; `sync` ticks a delete mark off once it sees the files are gone.
 
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
@@ -6,9 +9,9 @@ use serde_json::{json, Value};
 
 use crate::{
     arr::Client,
-    db::{self, NOW},
+    db,
     error::{AppError, Result},
-    sync, AppState,
+    AppState,
 };
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +78,7 @@ pub async fn create(state: &AppState, input: NewMark, source: &str) -> Result<Va
     if !matches!(input.action.as_str(), "delete" | "redownload") {
         return Err(AppError::bad_request("action must be 'delete' or 'redownload'"));
     }
+    let delete = input.action == "delete";
     let id = input.media_id;
     let media = state
         .db(|c| Ok(db::get_media(c, id)?))?
@@ -83,24 +87,35 @@ pub async fn create(state: &AppState, input: NewMark, source: &str) -> Result<Va
     let title = media["title"].as_str().unwrap_or_default().to_string();
     let scope = input.scope.clone().unwrap_or_else(|| kind.clone());
 
+    // A delete mark needs files to point at: sync ticks it off as soon as there are none.
     let (label, size, season_number, episode_id, episode_number) = match (kind.as_str(), scope.as_str()) {
         ("movie", "movie") | ("series", "series") => {
+            if delete && media["file_count"].as_i64().unwrap_or(0) == 0 {
+                return Err(AppError::bad_request(format!("'{title}' has no files to delete")));
+            }
             (title.clone(), media["size_on_disk"].as_i64().unwrap_or(0), None, None, None)
         }
         ("series", "season") => {
             let n = input
                 .season_number
                 .ok_or_else(|| AppError::bad_request("season_number is required for scope 'season'"))?;
-            let size = state
+            let (size, files) = state
                 .db(|c| {
                     Ok(c.query_row(
-                        "SELECT size_on_disk FROM seasons WHERE media_id = ?1 AND season_number = ?2",
+                        "SELECT size_on_disk, episode_file_count FROM seasons
+                         WHERE media_id = ?1 AND season_number = ?2",
                         params![id, n],
-                        |r| r.get::<_, i64>(0),
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
                     )
                     .optional()?)
                 })?
                 .ok_or_else(|| AppError::not_found(format!("'{title}' has no season {n}")))?;
+            if delete && files == 0 {
+                return Err(AppError::bad_request(format!(
+                    "{} of '{title}' has no files to delete",
+                    season_label(n)
+                )));
+            }
             (season_label(n), size, Some(n), None, None)
         }
         ("series", "episode") => {
@@ -112,7 +127,7 @@ pub async fn create(state: &AppState, input: NewMark, source: &str) -> Result<Va
             if ep["seriesId"].as_i64() != media["arr_id"].as_i64() {
                 return Err(AppError::bad_request(format!("Episode {eid} does not belong to '{title}'")));
             }
-            if input.action == "delete" && ep["hasFile"] != true {
+            if delete && ep["hasFile"] != true {
                 return Err(AppError::bad_request("Episode has no file to delete"));
             }
             let s = ep["seasonNumber"].as_i64().unwrap_or(0);
@@ -199,192 +214,4 @@ pub fn remove(state: &AppState, ids: &[i64]) -> Result<usize> {
         }
         Ok(removed)
     })
-}
-
-/// Execute pending marks (all, or just `ids`) against Radarr/Sonarr, then resync.
-pub async fn apply(state: &AppState, ids: Option<Vec<i64>>) -> Result<Value> {
-    let _guard = state.work_lock.lock().await;
-    let mut pending = state.db(|c| {
-        Ok(db::query_json(
-            c,
-            "SELECT k.*, m.arr_id, m.seerr_media_id FROM marks k
-             LEFT JOIN media m ON m.id = k.media_id
-             WHERE k.status = 'pending' ORDER BY k.id",
-            &[],
-        )?)
-    })?;
-    if let Some(ids) = &ids {
-        pending.retain(|m| m["id"].as_i64().is_some_and(|id| ids.contains(&id)));
-    }
-
-    let mut results = Vec::new();
-    let (mut applied, mut failed) = (0, 0);
-    for mark in &pending {
-        let mark_id = mark["id"].as_i64().unwrap_or(0);
-        let outcome = execute(state, mark).await;
-        let error = outcome.as_ref().err().map(|e| e.message.clone());
-        state.db(|c| {
-            c.execute(
-                &format!("UPDATE marks SET status = ?1, error = ?2, executed_at = {NOW} WHERE id = ?3"),
-                params![if error.is_none() { "done" } else { "failed" }, error, mark_id],
-            )?;
-            let whole = matches!(mark["scope"].as_str(), Some("movie" | "series"));
-            if error.is_none() && whole && mark["action"] == "delete" {
-                c.execute("DELETE FROM media WHERE id = ?1", params![mark["media_id"].as_i64()])?;
-            }
-            Ok(())
-        })?;
-        match &error {
-            None => applied += 1,
-            Some(e) => {
-                failed += 1;
-                tracing::warn!("mark {mark_id} ({}) failed: {e}", mark["label"]);
-            }
-        }
-        results.push(json!({
-            "id": mark_id,
-            "media_title": mark["media_title"],
-            "label": mark["label"],
-            "action": mark["action"],
-            "status": if error.is_none() { "done" } else { "failed" },
-            "error": error,
-        }));
-    }
-
-    let sync_report = if pending.is_empty() {
-        Value::Null
-    } else {
-        sync::sync_inner(state).await.unwrap_or_else(|e| json!({ "errors": [e.message] }))
-    };
-    Ok(json!({ "applied": applied, "failed": failed, "results": results, "sync": sync_report }))
-}
-
-async fn execute(state: &AppState, mark: &Value) -> Result<()> {
-    let arr_id = mark["arr_id"]
-        .as_i64()
-        .ok_or_else(|| AppError::not_found("Item is no longer in the library"))?;
-    let redownload = mark["action"] == "redownload";
-    let season = mark["season_number"].as_i64();
-
-    match mark["scope"].as_str().unwrap_or_default() {
-        "movie" => {
-            let radarr = Client::require(state, "radarr")?;
-            if redownload {
-                let mut movie = radarr.get(&format!("/movie/{arr_id}"), &[]).await?;
-                let file_id = movie["movieFile"]["id"].as_i64().or(movie["movieFileId"].as_i64()).filter(|n| *n > 0);
-                if movie["monitored"] != true {
-                    movie["monitored"] = json!(true);
-                    radarr.put(&format!("/movie/{arr_id}"), &movie).await?;
-                }
-                if let Some(file_id) = file_id {
-                    radarr.delete(&format!("/moviefile/{file_id}"), &[], None).await?;
-                }
-                radarr.post("/command", &json!({ "name": "MoviesSearch", "movieIds": [arr_id] })).await?;
-            } else {
-                radarr
-                    .delete(
-                        &format!("/movie/{arr_id}"),
-                        &[("deleteFiles", "true".into()), ("addImportExclusion", "false".into())],
-                        None,
-                    )
-                    .await?;
-                forget_in_seerr(state, mark).await;
-            }
-        }
-        "series" => {
-            let sonarr = Client::require(state, "sonarr")?;
-            if redownload {
-                set_season_monitoring(&sonarr, arr_id, None, true).await?;
-                delete_episode_files(&sonarr, arr_id, None).await?;
-                sonarr.post("/command", &json!({ "name": "SeriesSearch", "seriesId": arr_id })).await?;
-            } else {
-                sonarr
-                    .delete(
-                        &format!("/series/{arr_id}"),
-                        &[("deleteFiles", "true".into()), ("addImportListExclusion", "false".into())],
-                        None,
-                    )
-                    .await?;
-                forget_in_seerr(state, mark).await;
-            }
-        }
-        "season" => {
-            let sonarr = Client::require(state, "sonarr")?;
-            let n = season.ok_or_else(|| AppError::bad_request("Mark has no season number"))?;
-            // Unmonitor before deleting, otherwise Sonarr would just grab the season again.
-            set_season_monitoring(&sonarr, arr_id, Some(n), redownload).await?;
-            delete_episode_files(&sonarr, arr_id, Some(n)).await?;
-            if redownload {
-                sonarr
-                    .post("/command", &json!({ "name": "SeasonSearch", "seriesId": arr_id, "seasonNumber": n }))
-                    .await?;
-            }
-        }
-        "episode" => {
-            let sonarr = Client::require(state, "sonarr")?;
-            let eid = mark["episode_id"]
-                .as_i64()
-                .ok_or_else(|| AppError::bad_request("Mark has no episode id"))?;
-            let episode = sonarr.get(&format!("/episode/{eid}"), &[]).await?;
-            sonarr
-                .put("/episode/monitor", &json!({ "episodeIds": [eid], "monitored": redownload }))
-                .await?;
-            if let Some(file_id) = episode["episodeFileId"].as_i64().filter(|n| *n > 0) {
-                sonarr.delete(&format!("/episodefile/{file_id}"), &[], None).await?;
-            }
-            if redownload {
-                sonarr.post("/command", &json!({ "name": "EpisodeSearch", "episodeIds": [eid] })).await?;
-            }
-        }
-        other => return Err(AppError::bad_request(format!("Unknown scope '{other}'"))),
-    }
-    Ok(())
-}
-
-/// Set the monitored flag of one season (or, with `season = None`, make sure the series itself is monitored).
-async fn set_season_monitoring(sonarr: &Client, series_id: i64, season: Option<i64>, monitored: bool) -> Result<()> {
-    let mut series = sonarr.get(&format!("/series/{series_id}"), &[]).await?;
-    let mut changed = false;
-    if monitored && series["monitored"] != true {
-        series["monitored"] = json!(true);
-        changed = true;
-    }
-    if let (Some(n), Some(seasons)) = (season, series["seasons"].as_array_mut()) {
-        for s in seasons.iter_mut().filter(|s| s["seasonNumber"].as_i64() == Some(n)) {
-            if s["monitored"].as_bool() != Some(monitored) {
-                s["monitored"] = json!(monitored);
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        sonarr.put(&format!("/series/{series_id}"), &series).await?;
-    }
-    Ok(())
-}
-
-async fn delete_episode_files(sonarr: &Client, series_id: i64, season: Option<i64>) -> Result<()> {
-    let files = sonarr.get("/episodefile", &[("seriesId", series_id.to_string())]).await?;
-    let ids: Vec<i64> = files
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|f| season.is_none() || f["seasonNumber"].as_i64() == season)
-        .filter_map(|f| f["id"].as_i64())
-        .collect();
-    if !ids.is_empty() {
-        sonarr
-            .delete("/episodefile/bulk", &[], Some(&json!({ "episodeFileIds": ids })))
-            .await?;
-    }
-    Ok(())
-}
-
-/// Best effort: clear the item in Seerr so it shows as requestable again.
-async fn forget_in_seerr(state: &AppState, mark: &Value) {
-    let Some(media_id) = mark["seerr_media_id"].as_i64() else { return };
-    let Ok(Some(seerr)) = Client::for_service(state, "seerr") else { return };
-    if let Err(e) = seerr.delete(&format!("/media/{media_id}"), &[], None).await {
-        tracing::warn!("could not clear '{}' in Seerr: {e}", mark["media_title"]);
-    }
 }

@@ -131,12 +131,3 @@ pub async fn clear_marks(State(st): State<Shared>, Query(q): Query<ClearQuery>) 
     };
     Ok(Json(json!({ "removed": st.db(|c| Ok(c.execute(sql, [])?))? })))
 }
-
-#[derive(Deserialize)]
-pub struct ApplyRequest {
-    ids: Option<Vec<i64>>,
-}
-
-pub async fn apply(State(st): State<Shared>, Json(req): Json<ApplyRequest>) -> Result<Json<Value>> {
-    Ok(Json(marks::apply(&st, req.ids).await?))
-}

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Media, type Season } from '../api';
-import { findMark, formatDate, formatSize, seasonLabel, useMarkToggle } from '../util';
+import { findMark, formatDate, formatSize, seasonLabel, sizedImage, useMarkToggle } from '../util';
 import { AiBadge, Icon, MarkButtons, Modal, Poster } from './common';
 
 export default function MediaDetail({ id, onClose }: { id: number; onClose: () => void }) {
@@ -22,7 +22,7 @@ export default function MediaDetail({ id, onClose }: { id: number; onClose: () =
         <>
           <div
             className="detail-hero"
-            style={media.fanart_url ? { backgroundImage: `url(${media.fanart_url})` } : undefined}
+            style={media.fanart_url ? { backgroundImage: `url(${sizedImage(media.fanart_url, 'fanart')})` } : undefined}
           >
             <div className="detail-hero-inner">
               <div className="detail-poster">
@@ -178,7 +178,7 @@ function Episodes({ media, season, inherited }: { media: Media; season: number; 
               active={mark?.action ?? null}
               inherited={inherited}
               disabled={busy || (!e.has_file && !mark)}
-              onToggle={(action) => toggle(media, { scope: 'episode', episode_id: e.id }, action)}
+              onToggle={(action) => toggle(media, { scope: 'episode', season_number: season, episode_id: e.id }, action)}
             />
           </div>
         );

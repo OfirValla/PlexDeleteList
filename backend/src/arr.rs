@@ -1,6 +1,8 @@
-//! Thin HTTP client for Radarr, Sonarr and Seerr (Overseerr/Jellyseerr). All three accept `X-Api-Key`.
+//! Read-only HTTP client for Radarr, Sonarr and Seerr (Overseerr/Jellyseerr). All three accept `X-Api-Key`.
+//!
+//! Only GET exists here, on purpose: this app collects a list of what should be deleted and must never be
+//! able to delete or change anything in those services itself.
 
-use reqwest::Method;
 use serde_json::Value;
 
 use crate::{
@@ -45,22 +47,12 @@ impl Client {
             .ok_or_else(|| AppError::bad_request(format!("{} is not configured", label(name))))
     }
 
-    pub async fn request(
-        &self,
-        method: Method,
-        path: &str,
-        query: &[(&str, String)],
-        body: Option<&Value>,
-    ) -> Result<Value> {
-        let mut req = self
+    pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        let res = self
             .http
-            .request(method.clone(), format!("{}{}", self.base, path))
+            .get(format!("{}{}", self.base, path))
             .header("X-Api-Key", &self.key)
-            .query(query);
-        if let Some(body) = body {
-            req = req.json(body);
-        }
-        let res = req
+            .query(query)
             .send()
             .await
             .map_err(|e| AppError::upstream(format!("{}: {}", self.label, e.without_url())))?;
@@ -69,24 +61,11 @@ impl Client {
         if !status.is_success() {
             let snippet: String = text.chars().take(300).collect();
             return Err(AppError::upstream(format!(
-                "{} {method} {path} returned {status}: {snippet}",
+                "{} GET {path} returned {status}: {snippet}",
                 self.label
             )));
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
-    }
-
-    pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
-        self.request(Method::GET, path, query, None).await
-    }
-    pub async fn delete(&self, path: &str, query: &[(&str, String)], body: Option<&Value>) -> Result<Value> {
-        self.request(Method::DELETE, path, query, body).await
-    }
-    pub async fn post(&self, path: &str, body: &Value) -> Result<Value> {
-        self.request(Method::POST, path, &[], Some(body)).await
-    }
-    pub async fn put(&self, path: &str, body: &Value) -> Result<Value> {
-        self.request(Method::PUT, path, &[], Some(body)).await
     }
 }
 

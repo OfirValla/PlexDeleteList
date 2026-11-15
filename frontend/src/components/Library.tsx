@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Kind, type Media } from '../api';
 import { findMark, formatSize, useMarkToggle } from '../util';
@@ -106,7 +106,7 @@ export default function Library({ configured }: { configured: boolean }) {
       ) : (
         <div className="grid">
           {items.slice(0, visible).map((m) => (
-            <Card key={m.id} media={m} onOpen={() => setOpenId(m.id)} />
+            <Card key={m.id} media={m} onOpen={setOpenId} />
           ))}
         </div>
       )}
@@ -117,7 +117,8 @@ export default function Library({ configured }: { configured: boolean }) {
   );
 }
 
-function Card({ media, onOpen }: { media: Media; onOpen: () => void }) {
+/** Memoised so that marking one item re-renders that card only, not the whole grid. */
+const Card = memo(function Card({ media, onOpen }: { media: Media; onOpen: (id: number) => void }) {
   const { toggle, busy } = useMarkToggle();
   const whole = findMark(media.marks, { scope: media.kind });
   const partial = whole ? 0 : media.marks.length;
@@ -125,7 +126,7 @@ function Card({ media, onOpen }: { media: Media; onOpen: () => void }) {
 
   return (
     <article className={`card ${whole ? `marked ${whole.action}` : partial ? 'marked partial' : ''}`}>
-      <button type="button" className="card-poster" onClick={onOpen} aria-label={`Open ${media.title}`}>
+      <button type="button" className="card-poster" onClick={() => onOpen(media.id)} aria-label={`Open ${media.title}`}>
         <Poster url={media.poster_url} title={media.title} />
         <span className="card-size">{formatSize(media.size_on_disk)}</span>
         {(whole || partial > 0) && (
@@ -153,4 +154,4 @@ function Card({ media, onOpen }: { media: Media; onOpen: () => void }) {
       </div>
     </article>
   );
-}
+});

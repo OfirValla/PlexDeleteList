@@ -9,7 +9,7 @@ const services: { id: Service; name: string; hint: string; placeholder: string }
   {
     id: 'seerr',
     name: 'Seerr (optional)',
-    hint: 'Overseerr / Jellyseerr / Seerr. Shows who requested each item and clears it there when deleted.',
+    hint: 'Overseerr / Jellyseerr / Seerr. Shows who requested each item.',
     placeholder: 'http://localhost:5055',
   },
 ];
@@ -77,6 +77,9 @@ export default function Settings() {
         }}
       >
         <h2>Connections</h2>
+        <p className="muted">
+          Used only to read your library. This site never deletes or changes anything in these services.
+        </p>
         {services.map((s) => {
           const test = tests[s.id];
           return (
@@ -121,7 +124,7 @@ export default function Settings() {
         <h2>AI assistant (MCP)</h2>
         <p className="muted">
           Connect Claude or another MCP client so it can browse the library and suggest what to remove. Suggestions land in
-          the review queue tagged “AI”; only you can apply them.
+          the delete list tagged “AI”. Like this site, the assistant can only add to the list, not delete anything.
         </p>
         <h3>Claude Code</h3>
         <pre>claude mcp add --transport http plex-delete-list {mcpUrl}</pre>

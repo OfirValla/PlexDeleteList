@@ -4,7 +4,7 @@
 //! is a stdio transport that forwards each JSON-RPC message to that endpoint, so both transports share one
 //! implementation.
 //!
-//! By design there is no tool that applies marks: an LLM can propose deletions, a human confirms them in the UI.
+//! Like the rest of the app, these tools only build the delete list. Nothing here can delete or change media.
 
 use axum::{
     extract::State,
@@ -24,10 +24,11 @@ use crate::{
 
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "Plex Delete List helps the user free disk space in their Plex library. \
-You can browse the library (movies and TV series, synced from Radarr/Sonarr) and mark items for deletion \
-or redownload. Marks go into a review queue; nothing is deleted until the user confirms in the web UI, \
-and you cannot apply marks yourself. Typical flow: library_stats, then list_media (sorted by size, \
+const INSTRUCTIONS: &str = "Plex Delete List helps the user decide what to remove from their Plex library. \
+You can browse the library (movies and TV series, synced from Radarr/Sonarr) and put items on the user's \
+delete list, marked for deletion or redownload. The list is only a record: neither you nor this app can \
+delete or change any media, and the user removes the listed items themselves. An entry is ticked off \
+automatically once its files are gone. Typical flow: library_stats, then list_media (sorted by size, \
 filtered by age/genre/requester), get_media for season or episode detail, then mark_items with a short \
 reason for each item so the user understands why it was suggested. Sizes are in GiB.";
 
@@ -74,7 +75,7 @@ fn tools() -> Value {
         },
         {
             "name": "mark_items",
-            "description": "Add items to the user's review queue. action 'delete' removes the files (and the movie/series from Radarr/Sonarr when the whole item is marked); 'redownload' deletes the current files and searches for a new copy. Nothing happens until the user approves in the web UI. Marking a whole item replaces narrower marks on it.",
+            "description": "Add items to the user's delete list. action 'delete' means the user should remove it; 'redownload' means the current copy should be replaced with a better one. This only records the suggestion: nothing is deleted or changed, and the user acts on the list themselves. Marking a whole item replaces narrower marks on it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -99,15 +100,15 @@ fn tools() -> Value {
         },
         {
             "name": "list_marks",
-            "description": "The review queue: pending marks (from the user and from you) and recently applied or failed ones.",
+            "description": "The delete list: pending marks (from the user and from you), and optionally the ones already ticked off because their files are gone.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "include_history": { "type": "boolean", "description": "Also return applied/failed marks" } }
+                "properties": { "include_history": { "type": "boolean", "description": "Also return marks that were ticked off" } }
             }
         },
         {
             "name": "unmark_items",
-            "description": "Remove pending marks from the review queue by mark id.",
+            "description": "Remove pending marks from the delete list by mark id.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "mark_ids": { "type": "array", "items": { "type": "integer" } } },
@@ -258,7 +259,7 @@ async fn call_tool(state: &AppState, name: &str, args: Value) -> Result<Value> {
             }
             Ok(json!({
                 "results": results,
-                "note": "Marks are pending. The user must review and apply them in the web UI.",
+                "note": "Added to the delete list. Nothing was deleted; the user removes listed items themselves.",
             }))
         }
         "list_marks" => {
